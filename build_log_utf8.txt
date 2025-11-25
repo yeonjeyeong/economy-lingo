@@ -1,0 +1,80 @@
+﻿
+> economy-lingo@0.1.0 build
+> next build
+
+node.exe :  ??Warning: Next.js inf
+erred your workspace root, but it 
+may not be correct.
+위치 줄:1 문자:1
++ & "C:\Program Files\nodejs/node.
+exe" "C:\Program Files\nodejs/node
+_mo ...
++ ~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
+~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
+~~~
+    + CategoryInfo          : Not 
+   Specified: ( ??Warning: Nex..  
+  .not be correct.:String) [],    
+ RemoteException
+    + FullyQualifiedErrorId : Nat 
+   iveCommandError
+ 
+ We detected multiple lockfiles an
+d selected the directory of C:\Use
+rs\yjy12\package-lock.json as the 
+root directory.
+ To silence this warning, set `tur
+bopack.root` in your Next.js confi
+g, or consider removing one of the
+ lockfiles if it's not needed.
+   See https://nextjs.org/docs/app
+/api-reference/config/next-config-
+js/turbopack#root-directory for mo
+re information.
+ Detected additional lockfiles: 
+   * C:\Users\yjy12\.gemini\antigr
+avity\scratch\economy-lingo\packag
+e-lock.json
+
+   ??Next.js 16.0.3 (Turbopack)
+
+   Creating an optimized production build ...
+ ??Compiled successfully in 5.6s
+   Running TypeScript ...
+Failed to compile.
+
+./app/api/quiz-ai/route.ts:37:65
+Type error: Cannot find name 'coun
+t'.
+
+[0m [90m 35 |[39m             {
+ id[33m:[39m [35m5[39m[33m,[
+39m question[33m:[39m [32m"PMI 
+50 ?댁긽??"[39m[33m,[39m options
+[33m:[39m [[32m"移⑥껜"[39m[33m,
+[39m [32m"?뺤옣"[39m[33m,[39m 
+[32m"?섎씫"[39m[33m,[39m [32m"利앷
+?"[39m][33m,[39m correctAnswer
+[33m:[39m [35m1[39m[33m,[39m 
+difficulty[33m:[39m [32m"medium
+"[39m[33m,[39m explanation[33m
+:[39m [32m"PMI 50 ?댁긽? ?쒖“???뺤옣
+???섎??⑸땲??"[39m }
+ [90m 36 |[39m         ][33m;[
+39m
+[31m[1m>[22m[39m[90m 37 |[39
+m         [36mreturn[39m [33mNe
+xtResponse[39m[33m.[39mjson({ q
+uestions[33m:[39m fallback[33m.
+[39mslice([35m0[39m[33m,[39m 
+count)[33m,[39m source[33m:[39
+m [32m'fallback'[39m })[33m;[3
+9m
+ [90m    |[39m                  
+                                  
+             [31m[1m^[22m[39m
+ [90m 38 |[39m     }
+ [90m 39 |[39m }
+ [90m 40 |[39m[0m
+Next.js build worker exited with c
+ode: 1 and signal: null
