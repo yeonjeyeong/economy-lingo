@@ -1,11 +1,11 @@
 'use client';
 
-import { useState, useEffect } from 'react';
+import { useState, useEffect, useCallback } from 'react';
 import { useRouter } from 'next/navigation';
 import BackButton from '@/components/BackButton';
 import { useAdmin } from '@/hooks/useAdmin';
-import { db, auth } from '@/lib/firebase';
-import { collection, getDocs, doc, updateDoc, deleteDoc, query, orderBy, limit } from 'firebase/firestore';
+import { db } from '@/lib/firebase';
+import { collection, getDoc, getDocs, doc, updateDoc, deleteDoc, query, orderBy, writeBatch } from 'firebase/firestore';
 
 interface User {
     id: string;
@@ -13,14 +13,14 @@ interface User {
     email: string;
     score: number;
     quizzesTaken: number;
-    createdAt: any;
+    createdAt: unknown;
 }
 
 interface Post {
     id: string;
     title: string;
     author: string;
-    createdAt: any;
+    createdAt: unknown;
     views: number;
     comments: number;
     likes: number;
@@ -53,16 +53,7 @@ export default function AdminPage() {
         }
     }, [isAdminUser, adminLoading, router]);
 
-    useEffect(() => {
-        if (isAdminUser) {
-            fetchUsers();
-            fetchPosts();
-            fetchStats();
-        }
-    }, [isAdminUser]);
-
-    const fetchUsers = async () => {
-        setUsersLoading(true);
+    const fetchUsers = useCallback(async () => {
         try {
             const usersCol = collection(db, 'users');
             const q = query(usersCol, orderBy('score', 'desc'));
@@ -85,10 +76,9 @@ export default function AdminPage() {
         } finally {
             setUsersLoading(false);
         }
-    };
+    }, []);
 
-    const fetchPosts = async () => {
-        setPostsLoading(true);
+    const fetchPosts = useCallback(async () => {
         try {
             const postsCol = collection(db, 'posts');
             const q = query(postsCol, orderBy('createdAt', 'desc'));
@@ -113,9 +103,9 @@ export default function AdminPage() {
         } finally {
             setPostsLoading(false);
         }
-    };
+    }, []);
 
-    const fetchStats = async () => {
+    const fetchStats = useCallback(async () => {
         try {
             const usersSnapshot = await getDocs(collection(db, 'users'));
             const postsSnapshot = await getDocs(collection(db, 'posts'));
@@ -133,7 +123,19 @@ export default function AdminPage() {
         } catch (error) {
             console.error('Failed to fetch stats:', error);
         }
-    };
+    }, []);
+
+    useEffect(() => {
+        if (!isAdminUser) return;
+
+        const timer = window.setTimeout(() => {
+            void fetchUsers();
+            void fetchPosts();
+            void fetchStats();
+        }, 0);
+
+        return () => window.clearTimeout(timer);
+    }, [isAdminUser, fetchUsers, fetchPosts, fetchStats]);
 
     const handleUpdateScore = async (userId: string, currentScore: number) => {
         const newScore = prompt(`새 점수를 입력하세요 (현재: ${currentScore})`);
@@ -147,7 +149,14 @@ export default function AdminPage() {
 
         try {
             const userRef = doc(db, 'users', userId);
-            await updateDoc(userRef, { score: scoreNum });
+            const publicProfileRef = doc(db, 'publicProfiles', userId);
+            const publicProfile = await getDoc(publicProfileRef);
+            const batch = writeBatch(db);
+            batch.update(userRef, { score: scoreNum, totalScore: scoreNum });
+            if (publicProfile.exists()) {
+                batch.update(publicProfileRef, { totalScore: scoreNum });
+            }
+            await batch.commit();
             alert('점수가 업데이트되었습니다.');
             fetchUsers();
         } catch (error) {
@@ -156,17 +165,23 @@ export default function AdminPage() {
         }
     };
 
-    const handleDeleteUser = async (userId: string, username: string) => {
-        if (!confirm(`정말로 "${username}" 사용자를 삭제하시겠습니까?`)) return;
+    const handleDeleteUserProfile = async (userId: string, username: string) => {
+        if (!confirm(
+            `"${username}"님의 앱 프로필 문서를 삭제하시겠습니까?\n\n` +
+            'Firebase Authentication 로그인 계정은 삭제되지 않으며, 다시 이용하면 프로필이 재생성될 수 있습니다.'
+        )) return;
 
         try {
-            await deleteDoc(doc(db, 'users', userId));
-            alert('사용자가 삭제되었습니다.');
+            const batch = writeBatch(db);
+            batch.delete(doc(db, 'users', userId));
+            batch.delete(doc(db, 'publicProfiles', userId));
+            await batch.commit();
+            alert('앱 프로필 문서와 공개 랭킹 프로필을 삭제했습니다. 로그인 계정은 유지됩니다.');
             fetchUsers();
             fetchStats();
         } catch (error) {
-            console.error('Failed to delete user:', error);
-            alert('사용자 삭제 실패');
+            console.error('Failed to delete user profile documents:', error);
+            alert('프로필 문서 삭제 실패');
         }
     };
 
@@ -224,14 +239,14 @@ export default function AdminPage() {
 
                 {/* Tabs */}
                 <div style={{ display: 'flex', gap: '0.5rem', marginBottom: '2rem', borderBottom: '2px solid var(--border-color)' }}>
-                    {[
+                    {([
                         { id: 'users', label: '👥 사용자 관리' },
                         { id: 'posts', label: '📝 게시글 관리' },
                         { id: 'stats', label: '📊 통계' }
-                    ].map((tab) => (
+                    ] as const).map((tab) => (
                         <button
                             key={tab.id}
-                            onClick={() => setActiveTab(tab.id as any)}
+                            onClick={() => setActiveTab(tab.id)}
                             style={{
                                 padding: '0.75rem 1.5rem',
                                 background: activeTab === tab.id ? 'var(--primary)' : 'transparent',
@@ -290,7 +305,7 @@ export default function AdminPage() {
                                                         점수 수정
                                                     </button>
                                                     <button
-                                                        onClick={() => handleDeleteUser(user.id, user.username)}
+                                                        onClick={() => handleDeleteUserProfile(user.id, user.username)}
                                                         style={{
                                                             padding: '0.3rem 0.6rem',
                                                             background: '#f44336',
@@ -301,7 +316,7 @@ export default function AdminPage() {
                                                             fontSize: '0.85rem'
                                                         }}
                                                     >
-                                                        삭제
+                                                        프로필 문서 삭제
                                                     </button>
                                                 </td>
                                             </tr>

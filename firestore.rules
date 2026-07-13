@@ -1,8 +1,360 @@
 rules_version = '2';
 service cloud.firestore {
   match /databases/{database}/documents {
+    function signedIn() {
+      return request.auth != null;
+    }
+
+    function isOwner(userId) {
+      return signedIn() && request.auth.uid == userId;
+    }
+
+    function isAdmin() {
+      return signedIn() && request.auth.token.admin == true;
+    }
+
+    function postIsVisible(postData) {
+      return postData.get('isDeleted', false) == false;
+    }
+
+    function publicProfileDataIsSafe(data) {
+      return data.keys().hasAll([
+          'displayName', 'avatarUrl', 'totalScore', 'dailyScore',
+          'weeklyScore', 'quizzesTaken', 'dayKey', 'weekKey', 'updatedAt'
+        ])
+        && data.keys().hasOnly([
+          'displayName', 'avatarUrl', 'totalScore', 'dailyScore',
+          'weeklyScore', 'quizzesTaken', 'dayKey', 'weekKey', 'updatedAt'
+        ])
+        && data.displayName is string
+        && data.displayName.size() > 0
+        && data.displayName.size() <= 100
+        && data.avatarUrl is string
+        && data.avatarUrl.size() <= 2048
+        && data.totalScore is int
+        && data.dailyScore is int
+        && data.weeklyScore is int
+        && data.quizzesTaken is int
+        && data.quizzesTaken >= 0
+        && data.dayKey is string
+        && data.dayKey.size() == 10
+        && data.weekKey is string
+        && data.weekKey.size() >= 7
+        && data.weekKey.size() <= 8
+        && data.updatedAt is timestamp;
+    }
+
+    function userDataIsValid(data) {
+      return data.keys().hasAll([
+          'username', 'email', 'avatar', 'score', 'totalScore', 'dailyScore',
+          'weeklyScore', 'quizzesTaken', 'dayKey', 'weekKey', 'lastActive'
+        ])
+        && data.keys().hasOnly([
+          'username', 'email', 'avatar', 'score', 'totalScore', 'dailyScore',
+          'weeklyScore', 'quizzesTaken', 'dayKey', 'weekKey', 'lastActive',
+          'createdAt'
+        ])
+        && data.username is string
+        && data.username.size() > 0
+        && data.username.size() <= 100
+        && data.email is string
+        && data.email == request.auth.token.email
+        && data.avatar is string
+        && data.avatar.size() <= 2048
+        && data.score is int
+        && data.totalScore is int
+        && data.score == data.totalScore
+        && data.dailyScore is int
+        && data.weeklyScore is int
+        && data.quizzesTaken is int
+        && data.quizzesTaken >= 0
+        && data.dayKey is string
+        && data.dayKey.size() == 10
+        && data.weekKey is string
+        && data.weekKey.size() >= 7
+        && data.weekKey.size() <= 8
+        && data.lastActive is timestamp
+        && data.get('createdAt', request.time) is timestamp;
+    }
+
+    function publicProfileMatchesUser(userId, profileData) {
+      let userData = getAfter(/databases/$(database)/documents/users/$(userId)).data;
+      return profileData.displayName == userData.username
+        && profileData.avatarUrl == userData.avatar
+        && profileData.totalScore == userData.totalScore
+        && profileData.dailyScore == userData.dailyScore
+        && profileData.weeklyScore == userData.weeklyScore
+        && profileData.quizzesTaken == userData.quizzesTaken
+        && profileData.dayKey == userData.dayKey
+        && profileData.weekKey == userData.weekKey
+        && profileData.updatedAt == userData.lastActive;
+    }
+
+    function userMatchesPublicProfile(userId, userData) {
+      let profilePath = /databases/$(database)/documents/publicProfiles/$(userId);
+      let profileData = getAfter(profilePath).data;
+      return existsAfter(profilePath)
+        && profileData.displayName == userData.username
+        && profileData.avatarUrl == userData.avatar
+        && profileData.totalScore == userData.totalScore
+        && profileData.dailyScore == userData.dailyScore
+        && profileData.weeklyScore == userData.weeklyScore
+        && profileData.quizzesTaken == userData.quizzesTaken
+        && profileData.dayKey == userData.dayKey
+        && profileData.weekKey == userData.weekKey
+        && profileData.updatedAt == userData.lastActive;
+    }
+
+    match /users/{userId} {
+      allow read: if isOwner(userId) || isAdmin();
+      allow create, update: if isAdmin()
+        || (isOwner(userId)
+          && userDataIsValid(request.resource.data)
+          && request.resource.data.lastActive == request.time
+          && userMatchesPublicProfile(userId, request.resource.data));
+      allow delete: if isAdmin()
+        || (isOwner(userId)
+          && !existsAfter(/databases/$(database)/documents/publicProfiles/$(userId)));
+    }
+
+    match /publicProfiles/{userId} {
+      // Only this email-free projection is publicly queryable for rankings.
+      allow read: if true;
+      allow create, update: if publicProfileDataIsSafe(request.resource.data)
+        && (isAdmin()
+          || (isOwner(userId)
+          && publicProfileDataIsSafe(request.resource.data)
+          && request.resource.data.updatedAt == request.time
+          && existsAfter(/databases/$(database)/documents/users/$(userId))
+          && publicProfileMatchesUser(userId, request.resource.data)));
+      allow delete: if isAdmin() || isOwner(userId);
+    }
+
+    function postCreateIsValid(data) {
+      return data.keys().hasAll([
+          'title', 'content', 'author', 'authorId', 'createdAt', 'views',
+          'comments', 'likes', 'dislikes', 'isDeleted'
+        ])
+        && data.keys().hasOnly([
+          'title', 'content', 'author', 'authorId', 'createdAt', 'views',
+          'comments', 'likes', 'dislikes', 'isDeleted'
+        ])
+        && data.title is string
+        && data.title.size() > 0
+        && data.title.size() <= 200
+        && data.content is string
+        && data.content.size() > 0
+        && data.content.size() <= 10000
+        && data.author is string
+        && data.author.size() > 0
+        && data.author.size() <= 100
+        && data.authorId == request.auth.uid
+        && data.createdAt == request.time
+        && data.views == 0
+        && data.comments == 0
+        && data.likes == 0
+        && data.dislikes == 0
+        && data.isDeleted == false;
+    }
+
+    function counterWasDecremented(before, after) {
+      return (before > 0 && after == before - 1)
+        || (before == 0 && after == 0);
+    }
+
+    function reactionCreatedWithValidCounters(postId) {
+      let reactionPath = /databases/$(database)/documents/posts/$(postId)/reactions/$(request.auth.uid);
+      return !exists(reactionPath)
+        && existsAfter(reactionPath)
+        && ((getAfter(reactionPath).data.type == 'like'
+            && request.resource.data.likes == resource.data.likes + 1
+            && request.resource.data.dislikes == resource.data.dislikes)
+          || (getAfter(reactionPath).data.type == 'dislike'
+            && request.resource.data.likes == resource.data.likes
+            && request.resource.data.dislikes == resource.data.dislikes + 1));
+    }
+
+    function reactionDeletedWithValidCounters(postId) {
+      let reactionPath = /databases/$(database)/documents/posts/$(postId)/reactions/$(request.auth.uid);
+      return exists(reactionPath)
+        && !existsAfter(reactionPath)
+        && ((get(reactionPath).data.type == 'like'
+            && counterWasDecremented(resource.data.likes, request.resource.data.likes)
+            && request.resource.data.dislikes == resource.data.dislikes)
+          || (get(reactionPath).data.type == 'dislike'
+            && request.resource.data.likes == resource.data.likes
+            && counterWasDecremented(resource.data.dislikes, request.resource.data.dislikes)));
+    }
+
+    function reactionSwitchedWithValidCounters(postId) {
+      let reactionPath = /databases/$(database)/documents/posts/$(postId)/reactions/$(request.auth.uid);
+      return exists(reactionPath)
+        && existsAfter(reactionPath)
+        && get(reactionPath).data.type != getAfter(reactionPath).data.type
+        && ((get(reactionPath).data.type == 'like'
+            && getAfter(reactionPath).data.type == 'dislike'
+            && counterWasDecremented(resource.data.likes, request.resource.data.likes)
+            && request.resource.data.dislikes == resource.data.dislikes + 1)
+          || (get(reactionPath).data.type == 'dislike'
+            && getAfter(reactionPath).data.type == 'like'
+            && request.resource.data.likes == resource.data.likes + 1
+            && counterWasDecremented(resource.data.dislikes, request.resource.data.dislikes)));
+    }
+
+    function validPostCounterUpdate(postId) {
+      let changed = request.resource.data.diff(resource.data).affectedKeys();
+      return signedIn()
+        && postIsVisible(resource.data)
+        && changed.hasOnly(['views', 'comments', 'likes', 'dislikes'])
+        && request.resource.data.views is int
+        && request.resource.data.comments is int
+        && request.resource.data.likes is int
+        && request.resource.data.dislikes is int
+        && request.resource.data.views >= 0
+        && request.resource.data.comments >= 0
+        && request.resource.data.likes >= 0
+        && request.resource.data.dislikes >= 0
+        && ((changed.hasOnly(['views'])
+            && request.resource.data.views == resource.data.views + 1)
+          || (changed.hasOnly(['comments'])
+            && (request.resource.data.comments == resource.data.comments + 1
+              || request.resource.data.comments == resource.data.comments - 1))
+          || reactionCreatedWithValidCounters(postId)
+          || reactionDeletedWithValidCounters(postId)
+          || reactionSwitchedWithValidCounters(postId));
+    }
+
+    function validOwnerSoftDelete() {
+      return isOwner(resource.data.authorId)
+        && postIsVisible(resource.data)
+        && request.resource.data.diff(resource.data).affectedKeys()
+          .hasOnly(['isDeleted', 'deletedAt'])
+        && request.resource.data.isDeleted == true
+        && request.resource.data.deletedAt == request.time;
+    }
+
+    match /posts/{postId} {
+      allow read: if isAdmin() || postIsVisible(resource.data);
+      allow create: if signedIn() && postCreateIsValid(request.resource.data);
+      allow update: if isAdmin()
+        || validOwnerSoftDelete()
+        || validPostCounterUpdate(postId);
+      allow delete: if isAdmin();
+
+      function parentPostIsVisible() {
+        let postPath = /databases/$(database)/documents/posts/$(postId);
+        return exists(postPath) && postIsVisible(get(postPath).data);
+      }
+
+      function commentDataIsValid(data) {
+        return data.keys().hasAll(['content', 'author', 'authorId', 'createdAt'])
+          && data.keys().hasOnly(['content', 'author', 'authorId', 'createdAt'])
+          && data.content is string
+          && data.content.size() > 0
+          && data.content.size() <= 2000
+          && data.author is string
+          && data.author.size() > 0
+          && data.author.size() <= 100
+          && data.authorId == request.auth.uid
+          && data.createdAt == request.time;
+      }
+
+      function commentCreateUpdatesCount() {
+        let postPath = /databases/$(database)/documents/posts/$(postId);
+        return getAfter(postPath).data.comments == get(postPath).data.comments + 1;
+      }
+
+      function commentDeleteUpdatesCount() {
+        let postPath = /databases/$(database)/documents/posts/$(postId);
+        return counterWasDecremented(
+          get(postPath).data.comments,
+          getAfter(postPath).data.comments
+        );
+      }
+
+      match /comments/{commentId} {
+        allow read: if isAdmin() || parentPostIsVisible();
+        allow create: if signedIn()
+          && parentPostIsVisible()
+          && commentDataIsValid(request.resource.data)
+          && commentCreateUpdatesCount();
+        allow update: if false;
+        allow delete: if isAdmin()
+          || (signedIn()
+            && resource.data.authorId == request.auth.uid
+            && commentDeleteUpdatesCount());
+      }
+
+      function reactionDataIsValid(reactionId, data) {
+        return reactionId == request.auth.uid
+          && data.keys().hasAll(['type', 'userId', 'updatedAt'])
+          && data.keys().hasOnly(['type', 'userId', 'updatedAt'])
+          && data.userId == request.auth.uid
+          && (data.type == 'like' || data.type == 'dislike')
+          && data.updatedAt == request.time;
+      }
+
+      function reactionCreateUpdatesCounters(data) {
+        let postPath = /databases/$(database)/documents/posts/$(postId);
+        let before = get(postPath).data;
+        let after = getAfter(postPath).data;
+        return (data.type == 'like'
+            && after.likes == before.likes + 1
+            && after.dislikes == before.dislikes)
+          || (data.type == 'dislike'
+            && after.likes == before.likes
+            && after.dislikes == before.dislikes + 1);
+      }
+
+      function reactionDeleteUpdatesCounters() {
+        let postPath = /databases/$(database)/documents/posts/$(postId);
+        let before = get(postPath).data;
+        let after = getAfter(postPath).data;
+        return (resource.data.type == 'like'
+            && counterWasDecremented(before.likes, after.likes)
+            && after.dislikes == before.dislikes)
+          || (resource.data.type == 'dislike'
+            && after.likes == before.likes
+            && counterWasDecremented(before.dislikes, after.dislikes));
+      }
+
+      function reactionSwitchUpdatesCounters(data) {
+        let postPath = /databases/$(database)/documents/posts/$(postId);
+        let before = get(postPath).data;
+        let after = getAfter(postPath).data;
+        return resource.data.type != data.type
+          && ((resource.data.type == 'like'
+              && data.type == 'dislike'
+              && counterWasDecremented(before.likes, after.likes)
+              && after.dislikes == before.dislikes + 1)
+            || (resource.data.type == 'dislike'
+              && data.type == 'like'
+              && after.likes == before.likes + 1
+              && counterWasDecremented(before.dislikes, after.dislikes)));
+      }
+
+      match /reactions/{reactionId} {
+        allow read: if isAdmin()
+          || (isOwner(reactionId) && parentPostIsVisible());
+        allow create: if signedIn()
+          && parentPostIsVisible()
+          && reactionDataIsValid(reactionId, request.resource.data)
+          && reactionCreateUpdatesCounters(request.resource.data);
+        allow update: if signedIn()
+          && parentPostIsVisible()
+          && resource.data.userId == request.auth.uid
+          && reactionDataIsValid(reactionId, request.resource.data)
+          && reactionSwitchUpdatesCounters(request.resource.data);
+        allow delete: if isAdmin()
+          || (isOwner(reactionId)
+            && resource.data.userId == request.auth.uid
+            && reactionDeleteUpdatesCounters());
+      }
+    }
+
+    // Everything not explicitly matched above is denied.
     match /{document=**} {
-      allow read, write: if true;
+      allow read, write: if false;
     }
   }
 }

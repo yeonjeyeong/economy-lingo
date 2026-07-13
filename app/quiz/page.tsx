@@ -1,469 +1,405 @@
 'use client';
 
 import BackButton from '@/components/BackButton';
-import { useState, useEffect } from 'react';
-import { useRouter } from 'next/navigation';
-import { db, auth } from '@/lib/firebase';
-import { doc, getDoc, setDoc, updateDoc, increment, serverTimestamp } from 'firebase/firestore';
+import { useCallback, useEffect, useRef, useState } from 'react';
+import { auth, db } from '@/lib/firebase';
+import { doc, runTransaction, serverTimestamp } from 'firebase/firestore';
+
+type Difficulty = 'easy' | 'medium' | 'hard';
 
 interface QuizQuestion {
     id: number;
     question: string;
     options: string[];
     correctAnswer: number;
-    difficulty: string;
+    difficulty: Difficulty;
     explanation: string;
 }
 
+interface AnswerRecord {
+    question: QuizQuestion;
+    selectedAnswer: number;
+    correct: boolean;
+}
+
+interface LocalStats {
+    totalScore: number;
+    dailyScore: number;
+    weeklyScore: number;
+    quizzesTaken: number;
+    dayKey: string;
+    weekKey: string;
+}
+
+const difficultyLabels: Record<Difficulty, string> = {
+    easy: '쉬움',
+    medium: '보통',
+    hard: '어려움'
+};
+
+function localDateKey(date = new Date()): string {
+    return `${date.getFullYear()}-${String(date.getMonth() + 1).padStart(2, '0')}-${String(date.getDate()).padStart(2, '0')}`;
+}
+
+function localWeekKey(date = new Date()): string {
+    const day = new Date(date.getFullYear(), date.getMonth(), date.getDate());
+    const weekday = day.getDay() || 7;
+    day.setDate(day.getDate() + 4 - weekday);
+    const yearStart = new Date(day.getFullYear(), 0, 1);
+    const week = Math.ceil((((day.getTime() - yearStart.getTime()) / 86400000) + 1) / 7);
+    return `${day.getFullYear()}-W${String(week).padStart(2, '0')}`;
+}
+
+function readLocalStats(): LocalStats {
+    const dayKey = localDateKey();
+    const weekKey = localWeekKey();
+    try {
+        const stored = JSON.parse(localStorage.getItem('economyLingoStats') ?? '{}') as Partial<LocalStats>;
+        return {
+            totalScore: Number(stored.totalScore) || 0,
+            dailyScore: stored.dayKey === dayKey ? Number(stored.dailyScore) || 0 : 0,
+            weeklyScore: stored.weekKey === weekKey ? Number(stored.weeklyScore) || 0 : 0,
+            quizzesTaken: Number(stored.quizzesTaken) || 0,
+            dayKey,
+            weekKey
+        };
+    } catch {
+        return { totalScore: 0, dailyScore: 0, weeklyScore: 0, quizzesTaken: 0, dayKey, weekKey };
+    }
+}
+
 export default function QuizPage() {
-    const router = useRouter();
+    const [difficulty, setDifficulty] = useState<Difficulty>('medium');
     const [questions, setQuestions] = useState<QuizQuestion[]>([]);
     const [currentIndex, setCurrentIndex] = useState(0);
     const [selectedAnswer, setSelectedAnswer] = useState<number | null>(null);
     const [showResult, setShowResult] = useState(false);
-    const [score, setScore] = useState(0);
-    const [wrongAnswers, setWrongAnswers] = useState<QuizQuestion[]>([]);
+    const [records, setRecords] = useState<AnswerRecord[]>([]);
     const [loading, setLoading] = useState(true);
+    const [error, setError] = useState('');
     const [quizComplete, setQuizComplete] = useState(false);
-    const [correctAnswersCount, setCorrectAnswersCount] = useState(0);
+    const [isRetry, setIsRetry] = useState(false);
+    const [source, setSource] = useState('');
+    const answerLocked = useRef(false);
+    const scoreSaved = useRef(false);
 
-    useEffect(() => {
-        fetchQuiz();
+    const resetProgress = useCallback(() => {
+        setCurrentIndex(0);
+        setSelectedAnswer(null);
+        setShowResult(false);
+        setRecords([]);
+        setQuizComplete(false);
+        answerLocked.current = false;
+        scoreSaved.current = false;
     }, []);
 
-    const fetchQuiz = async () => {
+    const loadQuiz = useCallback(async (nextDifficulty: Difficulty) => {
+        setLoading(true);
+        setError('');
+        setDifficulty(nextDifficulty);
+        setIsRetry(false);
+        resetProgress();
+
         try {
-            const res = await fetch('/api/quiz-ai?count=5&difficulty=medium');
-            const data = await res.json();
-            setQuestions(data.questions || []);
-        } catch (error) {
-            console.error('Failed to fetch quiz:', error);
+            const response = await fetch(`/api/quiz-ai?count=5&difficulty=${nextDifficulty}`, { cache: 'no-store' });
+            const data = await response.json() as { questions?: QuizQuestion[]; source?: string; error?: string };
+            if (!response.ok) throw new Error(data.error || '퀴즈를 불러오지 못했습니다.');
+            if (!Array.isArray(data.questions) || data.questions.length === 0) throw new Error('사용 가능한 문제가 없습니다.');
+            setQuestions(data.questions);
+            setSource(data.source ?? 'curated');
+        } catch (loadError) {
+            console.error('Failed to fetch quiz:', loadError);
+            setQuestions([]);
+            setError(loadError instanceof Error ? loadError.message : '퀴즈를 불러오지 못했습니다.');
         } finally {
             setLoading(false);
+        }
+    }, [resetProgress]);
+
+    useEffect(() => {
+        const initialize = async () => {
+            await Promise.resolve();
+            const retryWrong = new URLSearchParams(window.location.search).get('retry') === 'wrong';
+            if (!retryWrong) {
+                await loadQuiz('medium');
+                return;
+            }
+
+            resetProgress();
+            setIsRetry(true);
+            setSource('wrong-note');
+            try {
+                const saved = JSON.parse(localStorage.getItem('wrongAnswers') ?? '[]') as QuizQuestion[];
+                const validQuestions = Array.isArray(saved)
+                    ? saved.filter((question) => question
+                        && typeof question.question === 'string'
+                        && Array.isArray(question.options)
+                        && question.options.length === 4
+                        && Number.isInteger(question.correctAnswer))
+                    : [];
+                if (validQuestions.length === 0) throw new Error('오답 노트에 다시 풀 문제가 없습니다.');
+                setQuestions(validQuestions);
+                setDifficulty(validQuestions[0].difficulty);
+                setLoading(false);
+            } catch (retryError) {
+                setQuestions([]);
+                setError(retryError instanceof Error ? retryError.message : '오답 문제를 불러오지 못했습니다.');
+                setLoading(false);
+            }
+        };
+        void initialize();
+    }, [loadQuiz, resetProgress]);
+
+    const saveWrongAnswer = (record: AnswerRecord) => {
+        try {
+            const existing = JSON.parse(localStorage.getItem('wrongAnswers') ?? '[]') as Array<QuizQuestion & { selectedAnswer?: number }>;
+            const savedQuestion = { ...record.question, selectedAnswer: record.selectedAnswer };
+            const duplicateIndex = existing.findIndex((item) => item.question === record.question.question);
+            if (duplicateIndex >= 0) existing[duplicateIndex] = savedQuestion;
+            else existing.push(savedQuestion);
+            localStorage.setItem('wrongAnswers', JSON.stringify(existing));
+        } catch (storageError) {
+            console.error('Failed to save wrong answer:', storageError);
         }
     };
 
     const saveScore = async (finalScore: number) => {
+        if (scoreSaved.current) return;
+        scoreSaved.current = true;
+
+        const safeScore = Math.max(0, Math.min(finalScore, questions.length * 100));
+        const localStats = readLocalStats();
+        const nextStats: LocalStats = {
+            totalScore: localStats.totalScore + safeScore,
+            dailyScore: localStats.dailyScore + safeScore,
+            weeklyScore: localStats.weeklyScore + safeScore,
+            quizzesTaken: localStats.quizzesTaken + 1,
+            dayKey: localStats.dayKey,
+            weekKey: localStats.weekKey
+        };
+        localStorage.setItem('economyLingoStats', JSON.stringify(nextStats));
+
         const user = auth.currentUser;
         if (!user) return;
 
         const userRef = doc(db, 'users', user.uid);
-
+        const profileRef = doc(db, 'publicProfiles', user.uid);
         try {
-            const userSnap = await getDoc(userRef);
+            await runTransaction(db, async (transaction) => {
+                const [userSnapshot, profileSnapshot] = await Promise.all([
+                    transaction.get(userRef),
+                    transaction.get(profileRef)
+                ]);
+                const current = profileSnapshot.data() ?? userSnapshot.data() ?? {};
+                const totalScore = (Number(current.totalScore ?? current.score) || 0) + safeScore;
+                const dailyScore = current.dayKey === nextStats.dayKey
+                    ? (Number(current.dailyScore) || 0) + safeScore
+                    : safeScore;
+                const weeklyScore = current.weekKey === nextStats.weekKey
+                    ? (Number(current.weeklyScore) || 0) + safeScore
+                    : safeScore;
+                const quizzesTaken = (Number(current.quizzesTaken) || 0) + 1;
 
-            if (userSnap.exists()) {
-                await updateDoc(userRef, {
-                    score: increment(finalScore),
-                    quizzesTaken: increment(1),
-                    lastActive: serverTimestamp()
-                });
-            } else {
-                await setDoc(userRef, {
-                    username: user.displayName || 'Anonymous',
+                transaction.set(userRef, {
+                    username: user.displayName || '익명 학습자',
                     email: user.email,
                     avatar: user.photoURL || '',
-                    score: finalScore,
-                    quizzesTaken: 1,
-                    createdAt: serverTimestamp(),
+                    score: totalScore,
+                    totalScore,
+                    dailyScore,
+                    weeklyScore,
+                    quizzesTaken,
+                    dayKey: nextStats.dayKey,
+                    weekKey: nextStats.weekKey,
                     lastActive: serverTimestamp()
-                });
-            }
-            console.log('Score saved successfully');
-        } catch (error) {
-            console.error('Error saving score:', error);
+                }, { merge: true });
+
+                transaction.set(profileRef, {
+                    displayName: user.displayName || '익명 학습자',
+                    avatarUrl: user.photoURL || '',
+                    totalScore,
+                    dailyScore,
+                    weeklyScore,
+                    quizzesTaken,
+                    dayKey: nextStats.dayKey,
+                    weekKey: nextStats.weekKey,
+                    updatedAt: serverTimestamp()
+                }, { merge: true });
+            });
+        } catch (saveError) {
+            console.error('Cloud score save failed; local score is preserved:', saveError);
         }
     };
 
-    const handleAnswer = () => {
-        if (selectedAnswer === null) return;
-
-        const currentQuestion = questions[currentIndex];
-        const isCorrect = selectedAnswer === currentQuestion.correctAnswer;
-
-        if (isCorrect) {
-            setScore(prev => prev + 100);
-            setCorrectAnswersCount(prev => prev + 1);
-        } else {
-            setScore(prev => prev - 50);
-            const newWrongAnswers = [...wrongAnswers, currentQuestion];
-            setWrongAnswers(newWrongAnswers);
-
-            // Save to local storage for wrong answer note
-            const saved = localStorage.getItem('wrongAnswers');
-            const existingWrong = saved ? JSON.parse(saved) : [];
-            // Avoid duplicates based on question text
-            if (!existingWrong.some((q: QuizQuestion) => q.question === currentQuestion.question)) {
-                existingWrong.push(currentQuestion);
-                localStorage.setItem('wrongAnswers', JSON.stringify(existingWrong));
-            }
-        }
-
+    const submitAnswer = () => {
+        if (selectedAnswer === null || showResult || answerLocked.current) return;
+        answerLocked.current = true;
+        const question = questions[currentIndex];
+        const record: AnswerRecord = {
+            question,
+            selectedAnswer,
+            correct: selectedAnswer === question.correctAnswer
+        };
+        setRecords((previous) => [...previous, record]);
+        if (!record.correct) saveWrongAnswer(record);
         setShowResult(true);
     };
 
-    const handleNext = () => {
+    const goNext = () => {
+        if (!showResult) return;
         if (currentIndex < questions.length - 1) {
-            setCurrentIndex(currentIndex + 1);
+            setCurrentIndex((index) => index + 1);
             setSelectedAnswer(null);
             setShowResult(false);
-        } else {
-            setQuizComplete(true);
-            saveScore(score);
+            answerLocked.current = false;
+            return;
+        }
+
+        setQuizComplete(true);
+        if (!isRetry) {
+            const finalScore = records.filter((record) => record.correct).length * 100;
+            void saveScore(finalScore);
         }
     };
 
-    const restartQuiz = () => {
-        setCurrentIndex(0);
-        setSelectedAnswer(null);
-        setShowResult(false);
-        setScore(0);
-        setCorrectAnswersCount(0);
-        setWrongAnswers([]);
-        setQuizComplete(false);
-        fetchQuiz();
+    const retryWrongAnswers = () => {
+        const wrongQuestions = records.filter((record) => !record.correct).map((record) => record.question);
+        if (wrongQuestions.length === 0) return;
+        setQuestions(wrongQuestions);
+        setIsRetry(true);
+        resetProgress();
     };
 
     if (loading) {
+        return <main style={pageStyle}><section style={messageCardStyle}><div style={{ fontSize: '3rem' }}>🧠</div><p>경제 퀴즈를 준비하고 있어요.</p></section></main>;
+    }
+
+    if (error || questions.length === 0) {
         return (
-            <div style={{
-                background: 'var(--bg-gradient)',
-                minHeight: '100vh',
-                display: 'flex',
-                alignItems: 'center',
-                justifyContent: 'center',
-                transition: 'background 0.3s ease'
-            }}>
-                <div style={{ textAlign: 'center' }}>
-                    <div style={{ fontSize: '4rem', marginBottom: '1rem', animation: 'bounce 1s infinite' }}>🦉</div>
-                    <p style={{ color: 'white', fontSize: '1.2rem' }}>퀴즈를 불러오는 중...</p>
-                </div>
-            </div>
+            <main style={pageStyle}>
+                <section style={messageCardStyle}>
+                    <div style={{ fontSize: '3rem' }}>⚠️</div>
+                    <h1>퀴즈를 불러오지 못했어요</h1>
+                    <p style={{ color: 'var(--text-secondary)' }}>{error || '잠시 후 다시 시도해 주세요.'}</p>
+                    <button style={primaryButtonStyle} onClick={() => void loadQuiz(difficulty)}>다시 시도</button>
+                </section>
+            </main>
         );
     }
 
-    if (questions.length === 0) {
-        return (
-            <div style={{ background: 'var(--bg-gradient)', minHeight: '100vh', padding: '2rem', transition: 'background 0.3s ease' }}>
-                <div style={{ textAlign: 'center', marginTop: '4rem' }}>
-                    <div style={{ fontSize: '4rem', marginBottom: '1rem' }}>😢</div>
-                    <p style={{ color: 'white', fontSize: '1.2rem', marginBottom: '2rem' }}>퀴즈를 불러올 수 없습니다.</p>
-                    <button onClick={() => router.push('/')} style={{
-                        background: 'var(--card-bg)',
-                        color: 'var(--primary)',
-                        border: 'none',
-                        padding: '1rem 2rem',
-                        borderRadius: '9999px',
-                        fontWeight: 'bold',
-                        fontSize: '1rem',
-                        cursor: 'pointer',
-                        boxShadow: 'var(--card-shadow)'
-                    }}>
-                        홈으로 돌아가기
-                    </button>
-                </div>
-            </div>
-        );
-    }
+    const score = records.filter((record) => record.correct).length * 100;
+    const wrongRecords = records.filter((record) => !record.correct);
 
     if (quizComplete) {
-        const percentage = (correctAnswersCount / questions.length) * 100;
         return (
-            <div style={{ background: 'var(--bg-gradient)', minHeight: '100vh', padding: '2rem', display: 'flex', alignItems: 'center', justifyContent: 'center', transition: 'background 0.3s ease' }}>
-                <div style={{ maxWidth: '600px', textAlign: 'center' }}>
-                    <div style={{
-                        background: 'var(--card-bg)',
-                        borderRadius: '2rem',
-                        padding: '3rem 2rem',
-                        boxShadow: 'var(--card-shadow)',
-                        animation: 'scaleIn 0.5s ease-out',
-                        border: '1px solid var(--border-color)'
-                    }}>
-                        <div style={{ fontSize: '5rem', marginBottom: '1rem' }}>
-                            {percentage === 100 ? '🎉' : percentage >= 60 ? '😊' : '😅'}
-                        </div>
-                        <h1 style={{ fontSize: '2.5rem', color: 'var(--text-primary)', marginBottom: '1rem' }}>
-                            {percentage === 100 ? '완벽해요!' : percentage >= 60 ? '잘했어요!' : '다시 도전!'}
-                        </h1>
-                        <div style={{
-                            fontSize: '4rem',
-                            fontWeight: 'bold',
-                            background: score >= 0 ? 'linear-gradient(135deg, #11998e 0%, #38ef7d 100%)' : 'linear-gradient(135deg, #ff9a56 0%, #ff6a88 100%)',
-                            WebkitBackgroundClip: 'text',
-                            WebkitTextFillColor: 'transparent',
-                            marginBottom: '2rem'
-                        }}>
-                            {score} 점
-                        </div>
-                        <p style={{ color: 'var(--text-secondary)', marginBottom: '2rem' }}>
-                            ({correctAnswersCount} / {questions.length} 문제 정답)
-                        </p>
-                        {wrongAnswers.length > 0 && (
-                            <div style={{
-                                background: 'rgba(255, 251, 240, 0.1)', // Slight transparency for dark mode compatibility
-                                border: '2px solid #ffd700',
-                                borderRadius: '1rem',
-                                padding: '1rem',
-                                marginBottom: '2rem'
-                            }}>
-                                <p style={{ color: 'var(--text-secondary)', fontSize: '0.95rem' }}>
-                                    📝 오답 {wrongAnswers.length}개가 오답 노트에 저장되었어요!
-                                </p>
+            <main style={pageStyle}>
+                <section style={{ ...messageCardStyle, maxWidth: '650px' }}>
+                    <div style={{ fontSize: '4rem' }}>{wrongRecords.length === 0 ? '🏆' : '📘'}</div>
+                    <h1>{isRetry ? '오답 재도전 완료' : '퀴즈 완료'}</h1>
+                    <p style={{ fontSize: '2rem', fontWeight: 800, color: 'var(--primary)' }}>{score}점</p>
+                    <p style={{ color: 'var(--text-secondary)' }}>{records.filter((record) => record.correct).length} / {questions.length}문제 정답</p>
+                    {records.map((record, index) => (
+                        <div key={`${record.question.id}-${index}`} style={{ textAlign: 'left', padding: '0.75rem', borderTop: '1px solid var(--border-color)' }}>
+                            <strong>{record.correct ? '✅' : '❌'} {record.question.question}</strong>
+                            <div style={{ color: 'var(--text-secondary)', marginTop: '0.25rem' }}>
+                                내 답: {record.question.options[record.selectedAnswer]}
                             </div>
-                        )}
-                        <div style={{ display: 'flex', gap: '1rem', justifyContent: 'center', flexWrap: 'wrap' }}>
-                            <button onClick={restartQuiz} style={{
-                                background: 'var(--primary)',
-                                color: 'white',
-                                border: 'none',
-                                padding: '1rem 2rem',
-                                borderRadius: '9999px',
-                                fontWeight: 'bold',
-                                fontSize: '1rem',
-                                cursor: 'pointer',
-                                boxShadow: '0 4px 12px rgba(0,0,0,0.2)',
-                                transition: 'transform 0.2s'
-                            }}
-                                onMouseEnter={(e) => e.currentTarget.style.transform = 'scale(1.05)'}
-                                onMouseLeave={(e) => e.currentTarget.style.transform = 'scale(1)'}
-                            >
-                                🔄 다시 풀기
-                            </button>
-                            <button onClick={() => router.push('/')} style={{
-                                background: 'var(--card-bg)',
-                                color: 'var(--text-secondary)',
-                                border: '2px solid var(--border-color)',
-                                padding: '1rem 2rem',
-                                borderRadius: '9999px',
-                                fontWeight: 'bold',
-                                fontSize: '1rem',
-                                cursor: 'pointer',
-                                transition: 'transform 0.2s'
-                            }}
-                                onMouseEnter={(e) => e.currentTarget.style.transform = 'scale(1.05)'}
-                                onMouseLeave={(e) => e.currentTarget.style.transform = 'scale(1)'}
-                            >
-                                🏠 홈으로
-                            </button>
                         </div>
+                    ))}
+                    <div style={{ display: 'flex', gap: '0.75rem', justifyContent: 'center', flexWrap: 'wrap', marginTop: '1rem' }}>
+                        {wrongRecords.length > 0 && <button style={primaryButtonStyle} onClick={retryWrongAnswers}>오답만 다시 풀기</button>}
+                        <button style={secondaryButtonStyle} onClick={() => void loadQuiz(difficulty)}>새 문제 풀기</button>
                     </div>
-                </div>
-            </div>
+                    {isRetry && <small style={{ color: 'var(--text-secondary)' }}>오답 재도전은 중복 점수로 합산되지 않습니다.</small>}
+                </section>
+            </main>
         );
     }
 
-    const currentQuestion = questions[currentIndex];
+    const question = questions[currentIndex];
     const progress = ((currentIndex + 1) / questions.length) * 100;
 
     return (
-        <div style={{ background: 'var(--bg-gradient)', minHeight: '100vh', padding: '1.5rem', transition: 'background 0.3s ease' }}>
-            <div style={{ maxWidth: '700px', margin: '0 auto' }}>
-                {/* Header */}
-                <div style={{ display: 'flex', alignItems: 'center', justifyContent: 'space-between', marginBottom: '1.5rem' }}>
+        <main style={pageStyle}>
+            <div style={{ width: '100%', maxWidth: '720px' }}>
+                <header style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', marginBottom: '1rem' }}>
                     <BackButton />
-                    <div style={{ color: 'white', fontWeight: 'bold' }}>
-                        {currentIndex + 1} / {questions.length}
-                    </div>
+                    <span style={{ color: 'white', fontWeight: 700 }}>{currentIndex + 1} / {questions.length}</span>
+                </header>
+                <div style={{ display: 'flex', gap: '0.5rem', marginBottom: '1rem', flexWrap: 'wrap' }}>
+                    {(Object.keys(difficultyLabels) as Difficulty[]).map((level) => (
+                        <button
+                            key={level}
+                            onClick={() => void loadQuiz(level)}
+                            disabled={records.length > 0}
+                            style={{ ...secondaryButtonStyle, opacity: difficulty === level ? 1 : 0.7, borderColor: difficulty === level ? 'var(--primary)' : 'var(--border-color)' }}
+                        >
+                            {difficultyLabels[level]}
+                        </button>
+                    ))}
+                    <span style={{ alignSelf: 'center', color: 'white', fontSize: '0.8rem' }}>
+                        {source === 'ai' ? 'AI 생성 문제' : source === 'wrong-note' ? '오답 노트 문제' : '검수된 문제'}{isRetry ? ' · 오답 재도전' : ''}
+                    </span>
                 </div>
-
-                {/* Progress Bar */}
-                <div style={{
-                    marginBottom: '2rem',
-                    background: 'rgba(255,255,255,0.3)',
-                    borderRadius: '9999px',
-                    height: '16px',
-                    overflow: 'hidden',
-                    boxShadow: '0 2px 8px rgba(0,0,0,0.1)'
-                }}>
-                    <div style={{
-                        width: `${progress}%`,
-                        height: '100%',
-                        background: 'linear-gradient(90deg, #FFD700 0%, #FFA500 100%)',
-                        borderRadius: '9999px',
-                        transition: 'width 0.4s cubic-bezier(0.4, 0, 0.2, 1)',
-                        boxShadow: '0 0 10px rgba(255,215,0,0.6)'
-                    }}></div>
+                <div style={{ height: '10px', background: 'rgba(255,255,255,0.3)', borderRadius: '999px', marginBottom: '1rem' }}>
+                    <div style={{ width: `${progress}%`, height: '100%', background: '#ffd166', borderRadius: '999px', transition: 'width .2s' }} />
                 </div>
-
-                {/* Question Card */}
-                <div style={{
-                    background: 'var(--card-bg)',
-                    borderRadius: '1.5rem',
-                    padding: '2.5rem 2rem',
-                    boxShadow: 'var(--card-shadow)',
-                    animation: 'slideUp 0.4s ease-out',
-                    border: '1px solid var(--border-color)'
-                }}>
-                    <div style={{
-                        background: currentQuestion.difficulty === 'easy' ? 'rgba(46, 125, 50, 0.1)' : currentQuestion.difficulty === 'medium' ? 'rgba(245, 124, 0, 0.1)' : 'rgba(198, 40, 40, 0.1)',
-                        color: currentQuestion.difficulty === 'easy' ? '#2e7d32' : currentQuestion.difficulty === 'medium' ? '#f57c00' : '#c62828',
-                        padding: '0.5rem 1rem',
-                        borderRadius: '9999px',
-                        display: 'inline-block',
-                        fontSize: '0.875rem',
-                        fontWeight: 'bold',
-                        marginBottom: '1.5rem'
-                    }}>
-                        {currentQuestion.difficulty === 'easy' ? '🟢 쉬움' : currentQuestion.difficulty === 'medium' ? '🟡 보통' : '🔴 어려움'}
-                    </div>
-
-                    <h2 style={{ fontSize: '1.4rem', marginBottom: '2rem', lineHeight: '1.6', color: 'var(--text-primary)', fontWeight: 'bold' }}>
-                        {currentQuestion.question}
-                    </h2>
-
-                    <div style={{ display: 'flex', flexDirection: 'column', gap: '1rem' }}>
-                        {currentQuestion.options.map((option, index) => {
-                            const isSelected = selectedAnswer === index;
-                            const isCorrect = index === currentQuestion.correctAnswer;
-                            const showCorrect = showResult && isCorrect;
-                            const showWrong = showResult && isSelected && !isCorrect;
-
+                <section style={{ background: 'var(--card-bg)', border: '1px solid var(--border-color)', borderRadius: '1.5rem', padding: 'clamp(1.25rem, 4vw, 2.25rem)', boxShadow: 'var(--card-shadow)' }}>
+                    <span style={{ color: 'var(--primary)', fontWeight: 700 }}>{difficultyLabels[question.difficulty]}</span>
+                    <h1 style={{ lineHeight: 1.5, fontSize: '1.35rem' }}>{question.question}</h1>
+                    <div style={{ display: 'grid', gap: '0.75rem' }}>
+                        {question.options.map((option, index) => {
+                            const selected = selectedAnswer === index;
+                            const correct = showResult && question.correctAnswer === index;
+                            const wrong = showResult && selected && !correct;
                             return (
                                 <button
-                                    key={index}
-                                    onClick={() => !showResult && setSelectedAnswer(index)}
+                                    key={option}
                                     disabled={showResult}
+                                    onClick={() => setSelectedAnswer(index)}
                                     style={{
-                                        padding: '1.25rem',
-                                        textAlign: 'left',
-                                        border: showResult
-                                            ? (showCorrect ? '3px solid #4caf50' : showWrong ? '3px solid #f44336' : '3px solid var(--border-color)')
-                                            : (isSelected ? '3px solid var(--primary)' : '3px solid var(--border-color)'),
-                                        borderRadius: '1rem',
-                                        background: showResult
-                                            ? (showCorrect ? 'rgba(76, 175, 80, 0.1)' : showWrong ? 'rgba(244, 67, 54, 0.1)' : 'var(--card-bg)')
-                                            : (isSelected ? 'rgba(79, 172, 254, 0.1)' : 'var(--card-bg)'),
-                                        color: 'var(--text-primary)',
-                                        cursor: showResult ? 'default' : 'pointer',
-                                        transition: 'all 0.2s',
-                                        fontSize: '1.05rem',
-                                        fontWeight: isSelected ? 'bold' : 'normal',
-                                        position: 'relative',
-                                        transform: isSelected && !showResult ? 'scale(1.02)' : 'scale(1)',
-                                        boxShadow: isSelected && !showResult ? '0 4px 12px rgba(0,0,0,0.1)' : 'none'
-                                    }}
-                                    onMouseEnter={(e) => {
-                                        if (!showResult && !isSelected) {
-                                            e.currentTarget.style.background = 'var(--border-color)';
-                                            e.currentTarget.style.transform = 'scale(1.02)';
-                                        }
-                                    }}
-                                    onMouseLeave={(e) => {
-                                        if (!showResult && !isSelected) {
-                                            e.currentTarget.style.background = 'var(--card-bg)';
-                                            e.currentTarget.style.transform = 'scale(1)';
-                                        }
+                                        padding: '1rem', textAlign: 'left', borderRadius: '0.85rem', cursor: showResult ? 'default' : 'pointer',
+                                        border: `2px solid ${correct ? '#2e7d32' : wrong ? '#c62828' : selected ? 'var(--primary)' : 'var(--border-color)'}`,
+                                        background: correct ? 'rgba(46,125,50,.12)' : wrong ? 'rgba(198,40,40,.12)' : 'var(--card-bg)',
+                                        color: 'var(--text-primary)', fontSize: '1rem'
                                     }}
                                 >
-                                    <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center' }}>
-                                        <span>{option}</span>
-                                        {showCorrect && <span style={{ fontSize: '1.5rem' }}>✓</span>}
-                                        {showWrong && <span style={{ fontSize: '1.5rem' }}>✗</span>}
-                                    </div>
+                                    {index + 1}. {option} {correct ? '✓' : wrong ? '✕' : ''}
                                 </button>
                             );
                         })}
                     </div>
-
                     {showResult && (
-                        <div style={{
-                            marginTop: '1.5rem',
-                            padding: '1.25rem',
-                            background: selectedAnswer === currentQuestion.correctAnswer ? 'rgba(76, 175, 80, 0.1)' : 'rgba(255, 152, 0, 0.1)',
-                            borderRadius: '1rem',
-                            borderLeft: `5px solid ${selectedAnswer === currentQuestion.correctAnswer ? '#4caf50' : '#ff9800'}`,
-                            animation: 'fadeIn 0.3s ease-out'
-                        }}>
-                            <div style={{ display: 'flex', alignItems: 'center', marginBottom: '0.75rem' }}>
-                                <span style={{ fontSize: '1.5rem', marginRight: '0.5rem' }}>
-                                    {selectedAnswer === currentQuestion.correctAnswer ? '🎉' : '💡'}
-                                </span>
-                                <p style={{ fontWeight: 'bold', margin: 0, color: 'var(--text-primary)' }}>
-                                    {selectedAnswer === currentQuestion.correctAnswer ? '정답이에요!' : '아쉬워요!'}
-                                </p>
-                            </div>
-                            <p style={{ fontSize: '0.95rem', color: 'var(--text-secondary)', lineHeight: '1.6', margin: 0 }}>
-                                {currentQuestion.explanation}
-                            </p>
-                        </div>
+                        <aside style={{ marginTop: '1rem', padding: '1rem', background: 'rgba(79,172,254,.1)', borderRadius: '0.75rem', color: 'var(--text-secondary)', lineHeight: 1.6 }}>
+                            <strong style={{ color: 'var(--text-primary)' }}>{selectedAnswer === question.correctAnswer ? '정답입니다.' : '정답을 확인해 보세요.'}</strong><br />
+                            {question.explanation}
+                        </aside>
                     )}
-
                     <button
-                        onClick={!showResult ? handleAnswer : handleNext}
+                        style={{ ...primaryButtonStyle, width: '100%', marginTop: '1rem', opacity: !showResult && selectedAnswer === null ? 0.5 : 1 }}
                         disabled={!showResult && selectedAnswer === null}
-                        style={{
-                            width: '100%',
-                            padding: '1.25rem',
-                            marginTop: '1.5rem',
-                            background: (!showResult && selectedAnswer === null)
-                                ? 'var(--border-color)'
-                                : 'var(--primary)',
-                            color: 'white',
-                            border: 'none',
-                            borderRadius: '9999px',
-                            fontWeight: 'bold',
-                            fontSize: '1.1rem',
-                            cursor: (!showResult && selectedAnswer === null) ? 'not-allowed' : 'pointer',
-                            boxShadow: (!showResult && selectedAnswer === null) ? 'none' : '0 4px 12px rgba(0,0,0,0.2)',
-                            transition: 'all 0.2s',
-                            opacity: (!showResult && selectedAnswer === null) ? 0.6 : 1
-                        }}
-                        onMouseEnter={(e) => {
-                            if (showResult || selectedAnswer !== null) {
-                                e.currentTarget.style.transform = 'scale(1.02)';
-                                e.currentTarget.style.boxShadow = '0 6px 16px rgba(0,0,0,0.3)';
-                            }
-                        }}
-                        onMouseLeave={(e) => {
-                            e.currentTarget.style.transform = 'scale(1)';
-                            e.currentTarget.style.boxShadow = (!showResult && selectedAnswer === null) ? 'none' : '0 4px 12px rgba(0,0,0,0.2)';
-                        }}
+                        onClick={showResult ? goNext : submitAnswer}
                     >
-                        {!showResult ? '답안 제출' : currentIndex < questions.length - 1 ? '다음 문제 →' : '결과 보기 🎯'}
+                        {showResult ? (currentIndex === questions.length - 1 ? '결과 보기' : '다음 문제') : '답 제출'}
                     </button>
-                </div>
-
-                <style jsx>{`
-          @keyframes bounce {
-            0%, 100% {
-              transform: translateY(0);
-            }
-            50% {
-              transform: translateY(-10px);
-            }
-          }
-          @keyframes scaleIn {
-            from {
-              opacity: 0;
-              transform: scale(0.9);
-            }
-            to {
-              opacity: 1;
-              transform: scale(1);
-            }
-          }
-          @keyframes slideUp {
-            from {
-              opacity: 0;
-              transform: translateY(30px);
-            }
-            to {
-              opacity: 1;
-              transform: translateY(0);
-            }
-          }
-          @keyframes fadeIn {
-            from {
-              opacity: 0;
-              transform: translateY(10px);
-            }
-            to {
-              opacity: 1;
-              transform: translateY(0);
-            }
-          }
-        `}</style>
+                </section>
             </div>
-        </div >
+        </main>
     );
 }
+
+const pageStyle: React.CSSProperties = {
+    minHeight: '100vh', background: 'var(--bg-gradient)', padding: '1.5rem', display: 'flex', justifyContent: 'center', alignItems: 'flex-start'
+};
+
+const messageCardStyle: React.CSSProperties = {
+    width: '100%', maxWidth: '520px', marginTop: '10vh', padding: '2rem', textAlign: 'center', background: 'var(--card-bg)', color: 'var(--text-primary)', borderRadius: '1.5rem', boxShadow: 'var(--card-shadow)'
+};
+
+const primaryButtonStyle: React.CSSProperties = {
+    border: 0, borderRadius: '999px', background: 'var(--primary)', color: 'white', padding: '0.85rem 1.25rem', fontWeight: 700, cursor: 'pointer'
+};
+
+const secondaryButtonStyle: React.CSSProperties = {
+    border: '1px solid var(--border-color)', borderRadius: '999px', background: 'var(--card-bg)', color: 'var(--text-primary)', padding: '0.7rem 1rem', fontWeight: 700, cursor: 'pointer'
+};
