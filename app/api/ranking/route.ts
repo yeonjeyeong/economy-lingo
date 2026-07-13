@@ -1,40 +1,95 @@
 import { NextResponse } from 'next/server';
+import { collection, getDocs, limit, orderBy, query } from 'firebase/firestore';
+import { db, isFirebaseConfigured } from '@/lib/firebase';
+
+const metrics = {
+    daily: 'dailyScore',
+    weekly: 'weeklyScore',
+    all: 'totalScore'
+} as const;
+
+type RankingPeriod = keyof typeof metrics;
+
+function seoulDateKey(): string {
+    return new Intl.DateTimeFormat('en-CA', {
+        timeZone: 'Asia/Seoul', year: 'numeric', month: '2-digit', day: '2-digit'
+    }).format(new Date());
+}
+
+function weekKeyFromDateKey(dateKey: string): string {
+    const [year, month, date] = dateKey.split('-').map(Number);
+    const day = new Date(year, month - 1, date);
+    const weekday = day.getDay() || 7;
+    day.setDate(day.getDate() + 4 - weekday);
+    const yearStart = new Date(day.getFullYear(), 0, 1);
+    const week = Math.ceil((((day.getTime() - yearStart.getTime()) / 86400000) + 1) / 7);
+    return `${day.getFullYear()}-W${String(week).padStart(2, '0')}`;
+}
 
 export async function GET(request: Request) {
+    const { searchParams } = new URL(request.url);
+    const period = searchParams.get('period') ?? 'daily';
+
+    if (!(period in metrics)) {
+        return NextResponse.json(
+            { error: 'period는 daily, weekly, all 중 하나여야 합니다.' },
+            { status: 400 }
+        );
+    }
+
+    const typedPeriod = period as RankingPeriod;
+    const metric = metrics[typedPeriod];
+    const dayKey = seoulDateKey();
+    const weekKey = weekKeyFromDateKey(dayKey);
+
+    if (!isFirebaseConfigured) {
+        return NextResponse.json({
+            period: typedPeriod,
+            metric,
+            rankings: [],
+            unavailable: true,
+            notice: '공개 랭킹 저장소가 설정되지 않아 기기 내 기록을 사용합니다.'
+        });
+    }
+
     try {
-        const { searchParams } = new URL(request.url);
-        const period = searchParams.get('period') || 'daily';
-
-        // Mock ranking data
-        const generateRankings = (type: string) => {
-            const names = [
-                '경제왕김철수', '재테크마스터', '주식고수박영희', '경제박사이민수',
-                '투자전문가정수', '금융왕최지훈', '경제전문가홍길동', '재무분석가윤서연',
-                '시장분석가강민지', '경제학도이준호'
-            ];
-
-            return names.map((name, index) => ({
-                rank: index + 1,
-                username: name,
-                score: type === 'daily' ? 950 - (index * 50) :
-                    type === 'weekly' ? 6500 - (index * 400) :
-                        25000 - (index * 1500),
-                quizzesTaken: type === 'daily' ? 19 - index :
-                    type === 'weekly' ? 130 - (index * 10) :
-                        500 - (index * 30),
-                avatar: `https://ui-avatars.com/api/?name=${encodeURIComponent(name)}&background=random`
-            }));
-        };
-
-        const rankings = generateRankings(period);
+        const rankingQuery = query(
+            collection(db, 'publicProfiles'),
+            orderBy(metric, 'desc'),
+            limit(50)
+        );
+        const snapshot = await getDocs(rankingQuery);
+        const rankings = snapshot.docs
+            .map((profile) => {
+                const data = profile.data();
+                const isCurrentPeriod = typedPeriod === 'daily'
+                    ? data.dayKey === dayKey
+                    : typedPeriod === 'weekly'
+                        ? data.weekKey === weekKey
+                        : true;
+                return {
+                    displayName: typeof data.displayName === 'string' && data.displayName.trim() ? data.displayName : '익명 학습자',
+                    avatarUrl: typeof data.avatarUrl === 'string' ? data.avatarUrl : '',
+                    score: isCurrentPeriod ? Math.max(0, Number(data[metric]) || 0) : 0,
+                    quizzesTaken: Math.max(0, Number(data.quizzesTaken) || 0)
+                };
+            })
+            .filter((user) => user.score > 0)
+            .sort((a, b) => b.score - a.score)
+            .map((user, index) => ({ ...user, id: `rank-${index + 1}`, rank: index + 1 }));
 
         return NextResponse.json({
-            period,
+            period: typedPeriod,
+            metric,
             rankings,
-            lastUpdated: new Date().toISOString()
+            unavailable: false,
+            notice: '랭킹은 이메일이 없는 공개 프로필의 학습 점수만 사용합니다.'
         });
     } catch (error) {
-        console.error('Ranking API error:', error);
-        return NextResponse.json({ error: 'Failed to fetch rankings' }, { status: 500 });
+        console.error('Public ranking query failed:', error);
+        return NextResponse.json(
+            { error: '공개 랭킹에 연결하지 못했습니다.', rankings: [] },
+            { status: 503 }
+        );
     }
 }

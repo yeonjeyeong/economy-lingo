@@ -15,21 +15,29 @@ export function ThemeProvider({ children }: { children: React.ReactNode }) {
     const [theme, setTheme] = useState<Theme>('light');
 
     useEffect(() => {
-        // Check localStorage or system preference on mount
-        const savedTheme = localStorage.getItem('theme') as Theme;
-        if (savedTheme) {
-            setTheme(savedTheme);
-            document.documentElement.classList.toggle('dark', savedTheme === 'dark');
-        } else if (window.matchMedia('(prefers-color-scheme: dark)').matches) {
-            setTheme('dark');
-            document.documentElement.classList.add('dark');
+        let nextTheme: Theme = 'light';
+        try {
+            const savedTheme = localStorage.getItem('theme') as Theme | null;
+            if (savedTheme === 'light' || savedTheme === 'dark') {
+                nextTheme = savedTheme;
+            } else if (window.matchMedia('(prefers-color-scheme: dark)').matches) {
+                nextTheme = 'dark';
+            }
+        } catch {
+            // Storage can be unavailable in privacy-restricted browsers.
         }
+        document.documentElement.classList.toggle('dark', nextTheme === 'dark');
+        queueMicrotask(() => setTheme(nextTheme));
     }, []);
 
     const toggleTheme = () => {
         const newTheme = theme === 'light' ? 'dark' : 'light';
         setTheme(newTheme);
-        localStorage.setItem('theme', newTheme);
+        try {
+            localStorage.setItem('theme', newTheme);
+        } catch {
+            // The visual theme still changes when storage is unavailable.
+        }
         document.documentElement.classList.toggle('dark', newTheme === 'dark');
     };
 

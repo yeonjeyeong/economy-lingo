@@ -1,173 +1,166 @@
 'use client';
 
 import BackButton from '@/components/BackButton';
-import { useState, useEffect } from 'react';
-import { useRouter } from 'next/navigation';
-import { db } from '@/lib/firebase';
-import { collection, query, orderBy, limit, getDocs } from 'firebase/firestore';
+import { useEffect, useState } from 'react';
+
+type RankingPeriod = 'daily' | 'weekly' | 'all';
 
 interface RankingUser {
+    id: string;
     rank: number;
-    username: string;
+    displayName: string;
     score: number;
     quizzesTaken: number;
-    avatar: string;
+}
+
+interface LocalStats {
+    totalScore?: number;
+    dailyScore?: number;
+    weeklyScore?: number;
+    quizzesTaken?: number;
+    dayKey?: string;
+    weekKey?: string;
+}
+
+function localDateKey(date = new Date()): string {
+    return `${date.getFullYear()}-${String(date.getMonth() + 1).padStart(2, '0')}-${String(date.getDate()).padStart(2, '0')}`;
+}
+
+function localWeekKey(date = new Date()): string {
+    const day = new Date(date.getFullYear(), date.getMonth(), date.getDate());
+    const weekday = day.getDay() || 7;
+    day.setDate(day.getDate() + 4 - weekday);
+    const yearStart = new Date(day.getFullYear(), 0, 1);
+    const week = Math.ceil((((day.getTime() - yearStart.getTime()) / 86400000) + 1) / 7);
+    return `${day.getFullYear()}-W${String(week).padStart(2, '0')}`;
+}
+
+function readDeviceRanking(period: RankingPeriod): RankingUser[] {
+    try {
+        const stats = JSON.parse(localStorage.getItem('economyLingoStats') ?? '{}') as LocalStats;
+        const metric: 'dailyScore' | 'weeklyScore' | 'totalScore' = period === 'daily' ? 'dailyScore' : period === 'weekly' ? 'weeklyScore' : 'totalScore';
+        if (period === 'daily' && stats.dayKey !== localDateKey()) return [];
+        if (period === 'weekly' && stats.weekKey !== localWeekKey()) return [];
+        const score = Math.max(0, Number(stats[metric]) || 0);
+        if (score === 0) return [];
+        return [{
+            id: 'this-device',
+            rank: 1,
+            displayName: '이 기기의 학습 기록',
+            score,
+            quizzesTaken: Math.max(0, Number(stats.quizzesTaken) || 0)
+        }];
+    } catch {
+        return [];
+    }
 }
 
 export default function RankingPage() {
-    const router = useRouter();
-    const [period, setPeriod] = useState('daily');
+    const [period, setPeriod] = useState<RankingPeriod>('daily');
     const [rankings, setRankings] = useState<RankingUser[]>([]);
     const [loading, setLoading] = useState(true);
+    const [error, setError] = useState('');
+    const [isDeviceOnly, setIsDeviceOnly] = useState(false);
 
     useEffect(() => {
-        fetchRankings();
+        let cancelled = false;
+
+        const fetchRankings = async () => {
+            setLoading(true);
+            setError('');
+            setIsDeviceOnly(false);
+            try {
+                const response = await fetch(`/api/ranking?period=${period}`, { cache: 'no-store' });
+                const data = await response.json() as { rankings?: RankingUser[]; unavailable?: boolean; error?: string };
+                if (!response.ok || !Array.isArray(data.rankings)) throw new Error(data.error || '랭킹을 불러오지 못했습니다.');
+
+                if (cancelled) return;
+                if (data.rankings.length > 0) {
+                    setRankings(data.rankings);
+                } else {
+                    setRankings(readDeviceRanking(period));
+                    setIsDeviceOnly(true);
+                }
+            } catch (rankingError) {
+                console.error('Failed to fetch public rankings:', rankingError);
+                if (cancelled) return;
+                setRankings(readDeviceRanking(period));
+                setIsDeviceOnly(true);
+                setError('공개 랭킹에 연결하지 못해 이 기기에 저장된 기록만 표시합니다.');
+            } finally {
+                if (!cancelled) setLoading(false);
+            }
+        };
+
+        void fetchRankings();
+        return () => { cancelled = true; };
     }, [period]);
 
-    const fetchRankings = async () => {
-        setLoading(true);
-        try {
-            const usersRef = collection(db, 'users');
-            const q = query(usersRef, orderBy('score', 'desc'), limit(50));
-            const querySnapshot = await getDocs(q);
-
-            const fetchedRankings: RankingUser[] = [];
-            let rank = 1;
-
-            querySnapshot.forEach((doc) => {
-                const data = doc.data();
-                fetchedRankings.push({
-                    rank: rank++,
-                    username: data.username || 'Anonymous',
-                    score: data.score || 0,
-                    quizzesTaken: data.quizzesTaken || 0,
-                    avatar: data.avatar || 'https://api.dicebear.com/7.x/avataaars/svg?seed=' + doc.id
-                });
-            });
-
-            setRankings(fetchedRankings);
-        } catch (error) {
-            console.error('Failed to fetch rankings:', error);
-        } finally {
-            setLoading(false);
-        }
-    };
-
-    const getMedalEmoji = (rank: number) => {
-        if (rank === 1) return '🥇';
-        if (rank === 2) return '🥈';
-        if (rank === 3) return '🥉';
-        return `#${rank}`;
-    };
-
-    const getGrade = (score: number) => {
-        if (score >= 10000) return { name: 'Diamond', icon: '💎', color: '#b9f2ff' };
-        if (score >= 3000) return { name: 'Gold', icon: '🥇', color: '#ffd700' };
-        if (score >= 1000) return { name: 'Silver', icon: '🥈', color: '#c0c0c0' };
-        return { name: 'Bronze', icon: '🥉', color: '#cd7f32' };
-    };
+    const periodLabels: Record<RankingPeriod, string> = { daily: '오늘', weekly: '이번 주', all: '전체' };
 
     return (
-        <div className="container" style={{ padding: '2rem 1rem', background: 'var(--bg-gradient)', minHeight: '100vh', transition: 'background 0.3s ease' }}>
-            <div style={{ maxWidth: '800px', margin: '0 auto' }}>
-                {/* Header */}
-                <div style={{ display: 'flex', alignItems: 'center', marginBottom: '2rem' }}>
-                    <BackButton style={{ marginRight: '1rem' }} />
-                    <h1 style={{ fontSize: '1.5rem', color: 'white', fontWeight: 'bold', textShadow: 'var(--header-text-shadow)' }}>랭킹</h1>
-                </div>
-
-                {/* Filter Tabs */}
-                <div style={{ marginBottom: '1.5rem', display: 'flex', gap: '0.5rem' }}>
-                    {['daily', 'weekly', 'all'].map((p) => (
+        <main style={{ minHeight: '100vh', padding: '2rem 1rem', background: 'var(--bg-gradient)' }}>
+            <div style={{ maxWidth: '760px', margin: '0 auto' }}>
+                <header style={{ display: 'flex', alignItems: 'center', gap: '1rem', marginBottom: '1.5rem' }}>
+                    <BackButton />
+                    <h1 style={{ margin: 0, color: 'white' }}>🏅 학습 랭킹</h1>
+                </header>
+                <nav aria-label="랭킹 기간" style={{ display: 'flex', gap: '0.5rem', marginBottom: '1rem' }}>
+                    {(Object.keys(periodLabels) as RankingPeriod[]).map((item) => (
                         <button
-                            key={p}
-                            onClick={() => setPeriod(p)}
+                            key={item}
+                            onClick={() => setPeriod(item)}
                             style={{
-                                padding: '0.5rem 1rem',
-                                background: period === p ? 'var(--primary)' : 'rgba(255,255,255,0.1)',
-                                color: period === p ? 'white' : 'var(--text-primary)',
+                                padding: '0.7rem 1.1rem', borderRadius: '999px', cursor: 'pointer', fontWeight: 700,
                                 border: '1px solid var(--border-color)',
-                                borderRadius: 'var(--radius)',
-                                cursor: 'pointer',
-                                transition: 'all 0.2s',
-                                fontWeight: period === p ? 'bold' : 'normal'
+                                background: item === period ? 'var(--primary)' : 'var(--card-bg)',
+                                color: item === period ? 'white' : 'var(--text-primary)'
                             }}
                         >
-                            {p === 'daily' ? '일간' : p === 'weekly' ? '주간' : '전체'}
+                            {periodLabels[item]}
                         </button>
                     ))}
-                </div>
+                </nav>
 
-                {loading ? (
-                    <div style={{ textAlign: 'center', padding: '3rem', color: 'white' }}>
-                        <p>랭킹을 불러오는 중...</p>
-                    </div>
-                ) : rankings.length === 0 ? (
-                    <div className="card" style={{ padding: '3rem', textAlign: 'center', background: 'var(--card-bg)', borderRadius: '1rem', boxShadow: 'var(--card-shadow)' }}>
-                        <p style={{ color: 'var(--text-secondary)' }}>랭킹 데이터가 없습니다.</p>
-                        <button
-                            onClick={() => router.push('/quiz')}
-                            style={{ marginTop: '1rem', padding: '0.5rem 1rem', cursor: 'pointer', background: 'var(--primary)', color: 'white', border: 'none', borderRadius: 'var(--radius)' }}
-                        >
-                            퀴즈 풀러 가기
-                        </button>
-                    </div>
-                ) : (
-                    <div style={{ display: 'flex', flexDirection: 'column', gap: '0.75rem' }}>
-                        {rankings.map((user) => {
-                            const grade = getGrade(user.score);
-                            return (
-                                <div
-                                    key={user.rank}
-                                    className="card"
-                                    style={{
-                                        padding: '1rem',
-                                        display: 'flex',
-                                        alignItems: 'center',
-                                        gap: '1rem',
-                                        background: user.rank <= 3 ? 'linear-gradient(to right, #ffd89b, #19547b)' : 'var(--card-bg)',
-                                        color: user.rank <= 3 ? 'white' : 'var(--text-primary)',
-                                        boxShadow: user.rank <= 3 ? '0 4px 12px rgba(0,0,0,0.15)' : 'var(--card-shadow)',
-                                        borderRadius: '1rem',
-                                        border: '1px solid var(--border-color)'
-                                    }}
-                                >
-                                    <div style={{ fontSize: '1.5rem', minWidth: '40px', fontWeight: 'bold' }}>
-                                        {getMedalEmoji(user.rank)}
-                                    </div>
-                                    <img
-                                        src={user.avatar}
-                                        alt={user.username}
-                                        style={{ width: '48px', height: '48px', borderRadius: '50%', border: '2px solid white' }}
-                                    />
-                                    <div style={{ flex: 1 }}>
-                                        <div style={{ fontWeight: 'bold', fontSize: '1.125rem' }}>{user.username}</div>
-                                        <div style={{ fontSize: '0.875rem', opacity: 0.8 }}>
-                                            {grade.icon} {grade.name} • 퀴즈 {user.quizzesTaken}회
-                                        </div>
-                                    </div>
-                                    <div style={{ textAlign: 'right', fontWeight: 'bold', fontSize: '1.25rem' }}>
-                                        {user.score}점
-                                    </div>
-                                </div>
-                            );
-                        })}
+                {(error || isDeviceOnly) && (
+                    <div style={{ padding: '0.85rem 1rem', marginBottom: '1rem', borderRadius: '0.75rem', background: 'rgba(255,255,255,.18)', color: 'white' }}>
+                        {error || '아직 공개된 점수 데이터가 없어 이 기기의 기록만 표시합니다.'}
                     </div>
                 )}
 
-                {/* Info */}
-                <div style={{
-                    marginTop: '2rem',
-                    padding: '1rem',
-                    backgroundColor: 'rgba(255,255,255,0.2)',
-                    borderRadius: 'var(--radius)',
-                    textAlign: 'center',
-                    fontSize: '0.875rem',
-                    color: 'white'
-                }}>
-                    💡 퀴즈를 풀고 랭킹을 올려보세요!
-                </div>
+                {loading ? (
+                    <section style={emptyStyle}>랭킹을 불러오는 중...</section>
+                ) : rankings.length === 0 ? (
+                    <section style={emptyStyle}>
+                        <div style={{ fontSize: '3rem' }}>📭</div>
+                        <h2>표시할 학습 기록이 없어요</h2>
+                        <p style={{ color: 'var(--text-secondary)' }}>퀴즈를 완료하면 이 기기에 기록이 안전하게 저장됩니다.</p>
+                    </section>
+                ) : (
+                    <section style={{ display: 'grid', gap: '0.75rem' }}>
+                        {rankings.map((user) => (
+                            <article key={user.id} style={{ display: 'flex', alignItems: 'center', gap: '1rem', padding: '1rem', borderRadius: '1rem', background: 'var(--card-bg)', color: 'var(--text-primary)', border: '1px solid var(--border-color)', boxShadow: 'var(--card-shadow)' }}>
+                                <strong style={{ width: '2.5rem', fontSize: '1.25rem' }}>{user.rank === 1 ? '🥇' : user.rank === 2 ? '🥈' : user.rank === 3 ? '🥉' : `#${user.rank}`}</strong>
+                                <div aria-hidden="true" style={{ width: '46px', height: '46px', display: 'grid', placeItems: 'center', borderRadius: '50%', background: 'rgba(79,172,254,.16)', fontSize: '1.2rem', fontWeight: 800 }}>
+                                    {Array.from(user.displayName)[0] || '👤'}
+                                </div>
+                                <div style={{ flex: 1, minWidth: 0 }}>
+                                    <strong>{user.displayName}</strong>
+                                    <div style={{ color: 'var(--text-secondary)', fontSize: '0.85rem' }}>완료한 퀴즈 {user.quizzesTaken}회</div>
+                                </div>
+                                <strong style={{ color: 'var(--primary)', fontSize: '1.2rem' }}>{user.score.toLocaleString()}점</strong>
+                            </article>
+                        ))}
+                    </section>
+                )}
+                <p style={{ textAlign: 'center', color: 'white', fontSize: '0.85rem', marginTop: '1.5rem' }}>
+                    이메일 등 비공개 계정 정보는 랭킹에 조회하거나 표시하지 않습니다.
+                </p>
             </div>
-        </div>
+        </main>
     );
 }
+
+const emptyStyle: React.CSSProperties = {
+    padding: '3rem 1rem', textAlign: 'center', borderRadius: '1rem', background: 'var(--card-bg)', color: 'var(--text-primary)', boxShadow: 'var(--card-shadow)'
+};

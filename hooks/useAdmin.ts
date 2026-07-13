@@ -1,23 +1,48 @@
 import { useState, useEffect } from 'react';
-import { auth } from '@/lib/firebase';
-import { isAdmin } from '@/lib/adminConfig';
-import { onAuthStateChanged } from 'firebase/auth';
+import { auth, isFirebaseConfigured } from '@/lib/firebase';
+import { hasAdminClaim } from '@/lib/adminConfig';
+import { getIdTokenResult, onIdTokenChanged } from 'firebase/auth';
 
 export function useAdmin() {
     const [isAdminUser, setIsAdminUser] = useState(false);
-    const [loading, setLoading] = useState(true);
+    const [loading, setLoading] = useState(isFirebaseConfigured);
 
     useEffect(() => {
-        const unsubscribe = onAuthStateChanged(auth, (user) => {
-            if (user && user.email) {
-                setIsAdminUser(isAdmin(user.email));
-            } else {
+        if (!isFirebaseConfigured) {
+            return;
+        }
+
+        let active = true;
+
+        const unsubscribe = onIdTokenChanged(auth, async (user) => {
+            if (!user) {
                 setIsAdminUser(false);
+                setLoading(false);
+                return;
             }
-            setLoading(false);
+
+            setLoading(true);
+            try {
+                const tokenResult = await getIdTokenResult(user);
+                if (active) {
+                    setIsAdminUser(hasAdminClaim(tokenResult.claims));
+                }
+            } catch (error) {
+                console.error('Failed to verify admin claim:', error);
+                if (active) {
+                    setIsAdminUser(false);
+                }
+            } finally {
+                if (active) {
+                    setLoading(false);
+                }
+            }
         });
 
-        return () => unsubscribe();
+        return () => {
+            active = false;
+            unsubscribe();
+        };
     }, []);
 
     return { isAdmin: isAdminUser, loading };

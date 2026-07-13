@@ -1,7 +1,7 @@
 'use client';
 
 import BackButton from '@/components/BackButton';
-import { useState, useEffect } from 'react';
+import { useEffect, useMemo, useState } from 'react';
 import { useRouter } from 'next/navigation';
 
 interface QuizQuestion {
@@ -9,146 +9,172 @@ interface QuizQuestion {
     question: string;
     options: string[];
     correctAnswer: number;
-    difficulty: string;
+    selectedAnswer?: number;
+    difficulty: 'easy' | 'medium' | 'hard';
     explanation: string;
 }
+
+const difficultyLabels = { easy: '쉬움', medium: '보통', hard: '어려움' } as const;
 
 export default function WrongAnswersPage() {
     const router = useRouter();
     const [wrongAnswers, setWrongAnswers] = useState<QuizQuestion[]>([]);
     const [loading, setLoading] = useState(true);
+    const [filter, setFilter] = useState<'all' | QuizQuestion['difficulty']>('all');
+    const [confirmingClear, setConfirmingClear] = useState(false);
+    const [storageError, setStorageError] = useState('');
 
     useEffect(() => {
-        const saved = localStorage.getItem('wrongAnswers');
-        if (saved) {
-            try {
-                setWrongAnswers(JSON.parse(saved));
-            } catch (e) {
-                console.error('Failed to parse wrong answers', e);
-            }
+        let nextAnswers: QuizQuestion[] = [];
+        let nextError = '';
+        try {
+            const saved = localStorage.getItem('wrongAnswers');
+            const parsed = saved ? JSON.parse(saved) : [];
+            nextAnswers = Array.isArray(parsed) ? parsed : [];
+        } catch {
+            nextError = '오답 기록을 읽지 못했습니다. 브라우저 저장소를 확인해 주세요.';
         }
-        setLoading(false);
+        queueMicrotask(() => {
+            setWrongAnswers(nextAnswers);
+            setStorageError(nextError);
+            setLoading(false);
+        });
     }, []);
 
-    const clearWrongAnswers = () => {
-        if (confirm('오답 노트를 초기화하시겠습니까?')) {
-            localStorage.removeItem('wrongAnswers');
-            setWrongAnswers([]);
+    const persist = (next: QuizQuestion[]) => {
+        try {
+            localStorage.setItem('wrongAnswers', JSON.stringify(next));
+            setWrongAnswers(next);
+            setStorageError('');
+        } catch {
+            setStorageError('변경 사항을 저장하지 못했습니다. 브라우저 저장 공간을 확인해 주세요.');
         }
     };
 
+    const visibleAnswers = useMemo(
+        () => filter === 'all' ? wrongAnswers : wrongAnswers.filter((item) => item.difficulty === filter),
+        [filter, wrongAnswers],
+    );
+
+    const removeAnswer = (question: QuizQuestion, index: number) => {
+        persist(wrongAnswers.filter((item, itemIndex) =>
+            item.id !== question.id || (item.id === question.id && itemIndex !== index),
+        ));
+    };
+
+    const clearWrongAnswers = () => {
+        persist([]);
+        setConfirmingClear(false);
+    };
+
     return (
-        <div style={{ background: 'var(--bg-gradient)', minHeight: '100vh', transition: 'background 0.3s ease', padding: '2rem 0' }}>
-            <div style={{ maxWidth: '800px', margin: '0 auto', padding: '0 1rem' }}>
-                {/* Header */}
-                <div style={{ display: 'flex', alignItems: 'center', justifyContent: 'space-between', marginBottom: '2rem' }}>
-                    <div style={{ display: 'flex', alignItems: 'center' }}>
-                        <BackButton style={{ marginRight: '1rem' }} />
-                        <h1 style={{ fontSize: '1.5rem', color: 'white', fontWeight: 'bold', textShadow: 'var(--header-text-shadow)' }}>📝 오답 노트</h1>
+        <div className="wrong-page">
+            <div className="wrong-page__inner">
+                <header className="wrong-page__header">
+                    <div>
+                        <BackButton />
+                        <div>
+                            <p>REVIEW & RETRY</p>
+                            <h1>오답 노트</h1>
+                        </div>
                     </div>
                     {wrongAnswers.length > 0 && (
-                        <button
-                            onClick={clearWrongAnswers}
-                            style={{
-                                padding: '0.5rem 1rem',
-                                background: 'var(--warning)',
-                                color: 'white',
-                                border: 'none',
-                                borderRadius: '0.5rem',
-                                cursor: 'pointer',
-                                fontWeight: 'bold',
-                                boxShadow: '0 2px 4px rgba(0,0,0,0.2)'
-                            }}
-                        >
-                            🗑️ 초기화
-                        </button>
+                        <div className="wrong-page__actions">
+                            <button className="button button-primary" onClick={() => router.push('/quiz?retry=wrong')}>
+                                오답만 다시 풀기
+                            </button>
+                            <button className="button" onClick={() => setConfirmingClear(true)}>전체 지우기</button>
+                        </div>
                     )}
-                </div>
+                </header>
 
-                {loading ? (
-                    <div style={{ textAlign: 'center', padding: '3rem', color: 'white' }}>
-                        <p>오답 노트를 불러오는 중...</p>
-                    </div>
-                ) : wrongAnswers.length === 0 ? (
-                    <div style={{ textAlign: 'center', padding: '4rem', background: 'var(--card-bg)', borderRadius: '1rem', boxShadow: 'var(--card-shadow)' }}>
-                        <div style={{ fontSize: '3rem', marginBottom: '1rem' }}>🎉</div>
-                        <h2 style={{ fontSize: '1.5rem', marginBottom: '0.5rem', color: 'var(--text-primary)' }}>오답 노트가 비어있어요!</h2>
-                        <p style={{ color: 'var(--text-secondary)' }}>틀린 문제가 없거나 아직 퀴즈를 풀지 않았네요.</p>
-                        <button
-                            onClick={() => router.push('/quiz')}
-                            style={{
-                                marginTop: '1.5rem',
-                                padding: '0.75rem 1.5rem',
-                                background: 'var(--primary)',
-                                color: 'white',
-                                border: 'none',
-                                borderRadius: '9999px',
-                                fontWeight: 'bold',
-                                cursor: 'pointer',
-                                boxShadow: '0 4px 12px rgba(0,0,0,0.2)'
-                            }}
-                        >
-                            퀴즈 풀러 가기
-                        </button>
-                    </div>
-                ) : (
-                    <div style={{ display: 'flex', flexDirection: 'column', gap: '1.5rem' }}>
-                        {wrongAnswers.map((question, index) => (
-                            <div
-                                key={index}
-                                style={{
-                                    background: 'var(--card-bg)',
-                                    padding: '1.5rem',
-                                    borderRadius: '1rem',
-                                    boxShadow: 'var(--card-shadow)',
-                                    border: '1px solid var(--border-color)'
-                                }}
+                {storageError && <p className="wrong-page__error" role="alert">{storageError}</p>}
+
+                {confirmingClear && (
+                    <section className="wrong-page__confirm" role="alertdialog" aria-labelledby="clear-title">
+                        <div>
+                            <strong id="clear-title">오답 기록을 모두 지울까요?</strong>
+                            <p>삭제한 기록은 복구할 수 없습니다.</p>
+                        </div>
+                        <div>
+                            <button className="button" onClick={() => setConfirmingClear(false)}>취소</button>
+                            <button className="button wrong-page__danger" onClick={clearWrongAnswers}>모두 삭제</button>
+                        </div>
+                    </section>
+                )}
+
+                {wrongAnswers.length > 0 && (
+                    <div className="wrong-page__filters" role="group" aria-label="난이도 필터">
+                        {(['all', 'easy', 'medium', 'hard'] as const).map((value) => (
+                            <button
+                                key={value}
+                                className={filter === value ? 'is-active' : ''}
+                                onClick={() => setFilter(value)}
+                                aria-pressed={filter === value}
                             >
-                                <div style={{
-                                    display: 'inline-block',
-                                    padding: '0.25rem 0.75rem',
-                                    borderRadius: '9999px',
-                                    fontSize: '0.75rem',
-                                    fontWeight: 'bold',
-                                    marginBottom: '1rem',
-                                    background: question.difficulty === 'easy' ? 'rgba(46, 125, 50, 0.1)' : question.difficulty === 'medium' ? 'rgba(245, 124, 0, 0.1)' : 'rgba(198, 40, 40, 0.1)',
-                                    color: question.difficulty === 'easy' ? '#2e7d32' : question.difficulty === 'medium' ? '#f57c00' : '#c62828'
-                                }}>
-                                    {question.difficulty === 'easy' ? '쉬움' : question.difficulty === 'medium' ? '보통' : '어려움'}
-                                </div>
-                                <h3 style={{ fontSize: '1.2rem', fontWeight: 'bold', marginBottom: '1rem', color: 'var(--text-primary)' }}>
-                                    Q. {question.question}
-                                </h3>
-                                <div style={{ display: 'flex', flexDirection: 'column', gap: '0.5rem', marginBottom: '1rem' }}>
-                                    {question.options.map((option, idx) => (
-                                        <div
-                                            key={idx}
-                                            style={{
-                                                padding: '0.75rem',
-                                                borderRadius: '0.5rem',
-                                                background: idx === question.correctAnswer ? 'rgba(46, 125, 50, 0.1)' : 'var(--background)',
-                                                color: idx === question.correctAnswer ? '#2e7d32' : 'var(--text-secondary)',
-                                                border: idx === question.correctAnswer ? '1px solid #4caf50' : '1px solid var(--border-color)',
-                                                fontWeight: idx === question.correctAnswer ? 'bold' : 'normal'
-                                            }}
-                                        >
-                                            {idx + 1}. {option} {idx === question.correctAnswer && '✅'}
-                                        </div>
-                                    ))}
-                                </div>
-                                <div style={{
-                                    background: 'rgba(255, 152, 0, 0.1)',
-                                    padding: '1rem',
-                                    borderRadius: '0.5rem',
-                                    borderLeft: '4px solid #ff9800'
-                                }}>
-                                    <p style={{ fontWeight: 'bold', marginBottom: '0.25rem', color: '#e65100' }}>💡 해설</p>
-                                    <p style={{ fontSize: '0.95rem', color: 'var(--text-primary)', lineHeight: '1.5' }}>{question.explanation}</p>
-                                </div>
-                            </div>
+                                {value === 'all' ? `전체 ${wrongAnswers.length}` : difficultyLabels[value]}
+                            </button>
                         ))}
                     </div>
                 )}
+
+                {loading ? (
+                    <section className="wrong-page__empty" aria-live="polite">오답 기록을 불러오는 중…</section>
+                ) : wrongAnswers.length === 0 ? (
+                    <section className="wrong-page__empty">
+                        <span aria-hidden="true">✓</span>
+                        <h2>아직 저장된 오답이 없어요</h2>
+                        <p>퀴즈에서 틀린 문제는 선택한 답과 함께 이곳에 자동으로 저장됩니다.</p>
+                        <button className="button button-primary" onClick={() => router.push('/quiz')}>퀴즈 풀러 가기</button>
+                    </section>
+                ) : visibleAnswers.length === 0 ? (
+                    <section className="wrong-page__empty">
+                        <h2>이 난이도의 오답이 없어요</h2>
+                        <button className="button" onClick={() => setFilter('all')}>전체 보기</button>
+                    </section>
+                ) : (
+                    <div className="wrong-list">
+                        {visibleAnswers.map((question, index) => (
+                            <article className="wrong-card" key={`${question.id}-${index}`}>
+                                <div className="wrong-card__top">
+                                    <span className={`difficulty difficulty--${question.difficulty}`}>
+                                        {difficultyLabels[question.difficulty]}
+                                    </span>
+                                    <button
+                                        className="wrong-card__remove"
+                                        onClick={() => removeAnswer(question, wrongAnswers.indexOf(question))}
+                                        aria-label={`오답 기록 삭제: ${question.question}`}
+                                    >
+                                        삭제
+                                    </button>
+                                </div>
+                                <h2>{question.question}</h2>
+                                <ol className="wrong-options">
+                                    {question.options.map((option, optionIndex) => {
+                                        const correct = optionIndex === question.correctAnswer;
+                                        const selectedWrong = optionIndex === question.selectedAnswer && !correct;
+                                        return (
+                                            <li
+                                                key={option}
+                                                className={`${correct ? 'is-correct' : ''}${selectedWrong ? ' is-selected-wrong' : ''}`}
+                                            >
+                                                <span>{optionIndex + 1}</span>
+                                                <span>{option}</span>
+                                                {correct && <strong>정답</strong>}
+                                                {selectedWrong && <strong>내가 고른 답</strong>}
+                                            </li>
+                                        );
+                                    })}
+                                </ol>
+                                <aside className="wrong-card__explanation">
+                                    <strong>해설</strong>
+                                    <p>{question.explanation}</p>
+                                </aside>
+                            </article>
+                        ))}
+                    </div>
+                )}
+                <p className="wrong-page__storage-note">오답 노트는 현재 이 브라우저에 저장됩니다.</p>
             </div>
         </div>
     );

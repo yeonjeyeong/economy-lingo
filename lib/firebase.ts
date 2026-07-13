@@ -1,5 +1,5 @@
 import { initializeApp, getApps } from 'firebase/app';
-import { getAuth, connectAuthEmulator } from 'firebase/auth';
+import { getAuth } from 'firebase/auth';
 import { getFirestore, connectFirestoreEmulator } from 'firebase/firestore';
 
 const firebaseConfig = {
@@ -12,19 +12,44 @@ const firebaseConfig = {
     measurementId: process.env.NEXT_PUBLIC_FIREBASE_MEASUREMENT_ID
 };
 
+export const isFirebaseConfigured = Boolean(
+    firebaseConfig.apiKey &&
+    firebaseConfig.authDomain &&
+    firebaseConfig.projectId &&
+    firebaseConfig.appId
+);
+
+// Firebase SDK objects are exported even in an unconfigured local checkout so
+// public, guest-friendly pages can still render. Network-backed features check
+// `isFirebaseConfigured` before using them.
+const runtimeConfig = isFirebaseConfigured
+    ? firebaseConfig
+    : {
+        apiKey: 'local-demo-key',
+        authDomain: 'localhost',
+        projectId: 'economy-lingo-local',
+        appId: 'local-demo-app'
+    };
+
 // Initialize Firebase (singleton pattern)
-const app = getApps().length === 0 ? initializeApp(firebaseConfig) : getApps()[0];
+const app = getApps().length === 0 ? initializeApp(runtimeConfig) : getApps()[0];
 
 export const auth = getAuth(app);
 export const db = getFirestore(app);
 
 // Connect to emulators only in development environment
-if (process.env.NODE_ENV === 'development' && typeof window !== 'undefined' && window.location.hostname === 'localhost') {
-    // Prevent multiple connections during hot reload
-    // @ts-ignore
-    if (!auth.emulatorConfig) {
-        // connectAuthEmulator(auth, "http://localhost:9099"); // Disable Auth Emulator for real Google Login
+if (
+    process.env.NODE_ENV === 'development' &&
+    process.env.NEXT_PUBLIC_USE_FIREBASE_EMULATORS === 'true' &&
+    typeof window !== 'undefined' &&
+    window.location.hostname === 'localhost'
+) {
+    const globalWithEmulator = globalThis as typeof globalThis & {
+        __economyLingoFirestoreEmulator?: boolean;
+    };
+    if (!globalWithEmulator.__economyLingoFirestoreEmulator) {
         connectFirestoreEmulator(db, 'localhost', 8080);
+        globalWithEmulator.__economyLingoFirestoreEmulator = true;
         console.log('Connected to Firestore Emulator (Auth is real)');
     }
 }
